@@ -209,4 +209,24 @@ module design_b::types {
     ): MedicalDevice {
         MedicalDevice { id: object::new(ctx), device_id, sensor_type, active: false }
     }
+
+    // ── DeviceRegistry (test helper) ────────────────────────────────────────
+    // Wraps a vector<MedicalDevice> in a key+store object so the vector
+    // can be properly consumed (transferred) after tests.
+
+    public struct DeviceRegistry has key, store {
+        id:      UID,
+        devices: vector<MedicalDevice>,
+    }
+
+    public fun new_registry(
+        devices: vector<MedicalDevice>,
+        ctx:     &mut TxContext,
+    ): DeviceRegistry {
+        DeviceRegistry { id: object::new(ctx), devices }
+    }
+
+    public fun registry_devices(r: &DeviceRegistry): &vector<MedicalDevice> {
+        &r.devices
+    }
 }

@@ -226,4 +226,18 @@ module design_a::types {
     public(package) fun accepted_nonces(b: &EvidenceBatch): &vector<u64> {
         &b.accepted_nonces
     }
+
+    #[test_only]
+    public fun new_device_inactive_for_test(
+        device_id:   address,
+        sensor_type: u8,
+        ctx:         &mut iota::tx_context::TxContext,
+    ): MedicalDevice {
+        MedicalDevice {
+            id: iota::object::new(ctx),
+            device_id,
+            sensor_type,
+            active: false,
+        }
+    }
 }
