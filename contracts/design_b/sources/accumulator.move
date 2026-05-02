@@ -52,7 +52,7 @@ module design_b::accumulator {
     // The window-closer is responsible for filtering slots by window_id
     // before calling this function. Slots for the wrong window abort at (2).
 
-    public entry fun finalize_from_slots(
+    public fun finalize_from_slots(
         mut slots:       vector<EvidenceSlot>,
         config:          &BatchConfig,
         devices:         &vector<MedicalDevice>,
