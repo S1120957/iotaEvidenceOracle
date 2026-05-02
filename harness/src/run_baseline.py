@@ -1,20 +1,17 @@
 """
 run_baseline.py — Baseline experiment sweep.
 
-Runs N_windows windows for each (design, sensor_count) combination.
-Writes per-window records to results/raw_baseline_{env}.csv
-Writes aggregated summary to results/table1_{env}.csv
-
-Usage:
-    python run_baseline.py
-    python run_baseline.py --env testnet
+Reads object_ids.json created by setup_objects.py.
+Runs WINDOWS_PER_RUN windows for each (design, N) combination.
+Writes results to harness/results/table1_{env}.csv
 """
 
 import asyncio
 import argparse
-import time
+import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -23,99 +20,95 @@ from config import (
     GRACE_INTERVAL_MS, ENV, RESULTS_DIR,
 )
 from metrics import WindowRecord, SensorWriteRecord, aggregate, save_window_records
-from sensor import SensorConfig, submit_sensor_write
+from sensor import SensorConfig, run_sensor
 from window_closer import finalize_window
+import csv
+
+
+def load_object_ids() -> dict:
+    path = os.path.join(RESULTS_DIR, "object_ids.json")
+    if not os.path.exists(path):
+        print("ERROR: harness/results/object_ids.json not found.")
+        print("Run python harness/src/setup_objects.py first.")
+        sys.exit(1)
+    with open(path) as f:
+        return json.load(f)
 
 
 async def run_one_window(
-    design:       str,
-    n_sensors:    int,
-    window_index: int,
-    client,
-    keypairs:     list,
-    object_ids:   dict,
-    fault:        str = "baseline",
+    design:      str,
+    n_sensors:   int,
+    window_idx:  int,
+    obj_ids:     dict,
+    fault:       str = "baseline",
 ) -> WindowRecord:
-    """
-    Execute one window: fire N concurrent sensor writes, then finalize.
-    Returns a WindowRecord with all metrics populated.
-    """
-    now_ms        = time.time() * 1000
-    window_start  = int(now_ms)
-    window_end    = int(now_ms + WINDOW_DURATION_MS)
-    window_id     = window_index
+    now_ms       = int(time.time() * 1000)
+    window_start = now_ms
+    window_end   = now_ms + WINDOW_DURATION_MS
+    window_id    = window_idx
+
+    ids_for_n    = obj_ids["by_n"][str(n_sensors)]
+    signer_alias = ids_for_n["signer_alias"]
 
     record = WindowRecord(
-        design=design,
-        sensor_count=n_sensors,
-        window_index=window_index,
-        window_end_ms=window_end,
+        design       = design,
+        sensor_count = n_sensors,
+        window_index = window_idx,
+        window_end_ms= window_end,
         fault_scenario=fault,
     )
 
     # Build per-sensor configs
     sensor_configs = []
     for i in range(n_sensors):
+        fault_i = fault if i == 0 else "baseline"
         cfg = SensorConfig(
-            sensor_index=i,
-            device_address=object_ids["sensor_addresses"][i],
-            sensor_type=i + 1,
-            window_id=window_id,
-            window_start_ms=window_start,
-            window_end_ms=window_end,
-            nonce=window_index * 1000 + i,
-            design=design,
-            fault=fault if i == 0 else "baseline",  # apply fault to sensor 0 only
+            sensor_index     = i,
+            signer_alias     = signer_alias,
+            device_address   = ids_for_n["device_addresses"][i],
+            device_object_id = ids_for_n["device_object_ids"][i],
+            sensor_type      = i + 1,
+            window_id        = window_id,
+            window_start_ms  = window_start,
+            window_end_ms    = window_end,
+            nonce            = window_idx * 1000 + i,
+            design           = design,
+            fault            = fault_i,
+            batch_object_id  = ids_for_n.get("batch_object_id_a", ""),
         )
-        # Inject object IDs needed by the transaction builders
-        cfg.device_object_id = object_ids["device_object_ids"][i]
-        if design == "A":
-            cfg.batch_object_id = object_ids.get("batch_object_id_a", "")
         sensor_configs.append(cfg)
 
     # Fire all sensors concurrently
-    tasks = [
-        submit_sensor_write(cfg, client, keypairs[cfg.sensor_index])
-        for cfg in sensor_configs
-    ]
-    write_records: list[SensorWriteRecord] = await asyncio.gather(*tasks)
-    record.writes = list(write_records)
+    tasks  = [run_sensor(cfg) for cfg in sensor_configs]
+    writes = await asyncio.gather(*tasks)
+    record.writes = list(writes)
 
-    # Collect slot IDs for Design B finalization
+    # Collect slot IDs for Design B
     slot_ids = None
     if design == "B":
-        slot_ids = object_ids.get("slot_object_ids", [])
+        slot_ids = [cfg.slot_object_id for cfg in sensor_configs
+                    if cfg.slot_object_id is not None]
 
-    # Finalize after grace interval
+    # Finalize
     result = await finalize_window(
-        design=design,
-        client=client,
-        keypair=keypairs[-1],   # window-closer keypair is last
-        window_end_ms=window_end,
-        batch_object_id=object_ids.get("batch_object_id_a") if design == "A" else None,
-        slot_object_ids=slot_ids,
-        config_object_id=object_ids.get("config_object_id_b"),
-        device_object_ids=object_ids.get("device_object_ids"),
+        design             = design,
+        window_end_ms      = window_end,
+        signer_alias       = signer_alias,
+        batch_object_id    = ids_for_n.get("batch_object_id_a") if design == "A" else None,
+        slot_object_ids    = slot_ids,
+        config_object_id   = ids_for_n.get("config_object_id_b"),
+        registry_object_id = None,
     )
     record.t_finalized_ms = result["t_finalized_ms"]
     record.batch_status   = result["batch_status"]
-
     return record
 
 
 async def run_sweep(env: str):
-    """Full baseline sweep: all designs × all N values × WINDOWS_PER_RUN."""
-    print(f"Starting baseline sweep on {env}")
+    print(f"Baseline sweep — env={env}")
     print(f"Designs: A, B | N: {SENSOR_COUNTS} | Windows: {WINDOWS_PER_RUN}")
 
-    # TODO: initialise iota_sdk.Client and load keypairs
-    # client = iota_sdk.Client(nodes=[RPC_URL])
-    # keypairs = load_keypairs_from_env()
-    # object_ids = load_object_ids_from_env()
-    client    = None   # replace
-    keypairs  = []     # replace
-    object_ids = {}    # replace
-
+    obj_ids     = load_object_ids()
     all_records = []
 
     for design in ["A", "B"]:
@@ -123,29 +116,27 @@ async def run_sweep(env: str):
             print(f"  Design {design}, N={n} ...")
             run_records = []
             for w in range(WINDOWS_PER_RUN):
-                rec = await run_one_window(
-                    design, n, w, client, keypairs, object_ids
-                )
+                rec = await run_one_window(design, n, w, obj_ids)
                 run_records.append(rec)
                 all_records.append(rec)
-                # Small pause between windows to avoid clock collisions
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.5)
 
             agg = aggregate(run_records)
-            print(f"    write_p50={agg['write_p50_median_ms']:.1f}ms "
-                  f"finalize={agg['finalization_latency_ms']:.1f}ms "
-                  f"valid={agg['validity_rate_pct']:.0f}%")
+            p50 = agg["write_p50_median_ms"]
+            fin = agg["finalization_latency_ms"]
+            val = agg["validity_rate_pct"]
+            p50s = f"{p50:.1f}" if p50 else "N/A"
+            fins = f"{fin:.1f}" if fin else "N/A"
+            print(f"    write_p50={p50s}ms  finalize={fins}ms  valid={val:.0f}%")
 
     save_window_records(all_records, f"raw_baseline_{env}.csv")
     _write_table1(all_records, env)
+    print("Baseline sweep complete.")
 
 
 def _write_table1(records, env: str):
-    """Write aggregated Table 1 structure to CSV."""
-    import csv
     os.makedirs(RESULTS_DIR, exist_ok=True)
     path = os.path.join(RESULTS_DIR, f"table1_{env}.csv")
-
     rows = []
     for design in ["A", "B"]:
         for n in SENSOR_COUNTS:
@@ -154,18 +145,14 @@ def _write_table1(records, env: str):
             if not subset:
                 continue
             agg = aggregate(subset)
-            rows.append({
-                "design": design,
-                "N": n,
-                **agg,
-            })
+            rows.append({"design": design, "N": n, **agg})
 
-    with open(path, "w", newline="") as f:
-        if rows:
+    if rows:
+        with open(path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
             writer.writeheader()
             writer.writerows(rows)
-    print(f"Table 1 → {path}")
+        print(f"Table 1 → {path}")
 
 
 if __name__ == "__main__":
