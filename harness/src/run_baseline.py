@@ -12,10 +12,10 @@ PKG_B  = "0xcde5399d72f19436e5c9b8e6c60be94645ee2e5ec23daeae9bfcadfb44b32174"
 WALLET = "0xd0e7976a242007d7ce49087578e46f93ae9b5bbfd8288240c39691905a5572b3"
 GAS    = "20000000"
 
-WINDOW_DURATION_MS = 10000
+WINDOW_DURATION_MS = 10000   # base; scaled per N in run_design_a_window
 GRACE_INTERVAL_MS  = 2000
 MAX_SPREAD_MS      = 10000
-WINDOWS_PER_RUN    = 3
+WINDOWS_PER_RUN    = 50
 SENSOR_COUNTS      = [2, 4, 8, 16, 32]
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
@@ -246,7 +246,7 @@ def main():
                 wid = random.randint(1000, 8999)
                 now = int(time.time() * 1000)
                 ws  = now + 2000
-                we  = ws + WINDOW_DURATION_MS
+                we  = ws + max(WINDOW_DURATION_MS, n * 2000)
 
                 if design == "A":
                     rec = run_design_a_window(n, wid, ws, we, devices)
