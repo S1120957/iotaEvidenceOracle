@@ -153,14 +153,14 @@ module design_b::accumulator {
         };
 
         // (4) Timestamp spread
-        let min_ts = *vector::borrow(&accepted_ts, 0);
-        let max_ts = *vector::borrow(&accepted_ts, 0);
+        let mut min_ts = *vector::borrow(&accepted_ts, 0);
+        let mut max_ts = *vector::borrow(&accepted_ts, 0);
         let mut t_idx = 1u64;
         let ts_count = vector::length(&accepted_ts);
         while (t_idx < ts_count) {
             let t = *vector::borrow(&accepted_ts, t_idx);
-            if (t < min_ts) { let min_ts = t; };
-            if (t > max_ts) { let max_ts = t; };
+            if (t < min_ts) { min_ts = t };
+            if (t > max_ts) { max_ts = t };
             t_idx = t_idx + 1;
         };
         assert!(max_ts - min_ts <= dw, types::err_spread_exceeded());

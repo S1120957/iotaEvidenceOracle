@@ -59,7 +59,7 @@ module design_a::accumulator {
         let nonce       = types::slot_nonce(&slot);
         let existing_devices = types::accepted_device_ids(batch);
         let existing_nonces  = types::accepted_nonces(batch);
-        let i = 0u64;
+        let mut i = 0u64;
         let len = vector::length(existing_devices);
         while (i < len) {
             if (*vector::borrow(existing_devices, i) == device_addr) {
@@ -74,7 +74,7 @@ module design_a::accumulator {
         // (7) No prior reading from same device + sensor_type
         let sensor_type      = types::slot_sensor_type(&slot);
         let existing_sensors = types::accepted_sensor_types(batch);
-        let j = 0u64;
+        let mut j = 0u64;
         while (j < len) {
             if (*vector::borrow(existing_devices, j) == device_addr) {
                 assert!(
@@ -135,10 +135,10 @@ module design_a::accumulator {
         };
 
         // (4) Timestamp spread
-        let timestamps = types::accepted_timestamps(batch);
-        let min_ts = *vector::borrow(timestamps, 0);
-        let max_ts = *vector::borrow(timestamps, 0);
-        let idx = 1u64;
+        let timestamps   = types::accepted_timestamps(batch);
+        let mut min_ts   = *vector::borrow(timestamps, 0);
+        let mut max_ts   = *vector::borrow(timestamps, 0);
+        let mut idx      = 1u64;
         while (idx < count) {
             let t = *vector::borrow(timestamps, idx);
             if (t < min_ts) { min_ts = t };
@@ -152,9 +152,9 @@ module design_a::accumulator {
 
         // All conditions hold — compute batch_hash and finalize
         // batch_hash = SHA3-256( window_id || accepted_slot_ids )
-        let preimage = bcs::to_bytes(&types::batch_window_id(batch));
+        let mut preimage = bcs::to_bytes(&types::batch_window_id(batch));
         let ids = types::batch_accepted_ids(batch);
-        let h_idx = 0u64;
+        let mut h_idx = 0u64;
         let id_count = vector::length(ids);
         while (h_idx < id_count) {
             let id_bytes = bcs::to_bytes(vector::borrow(ids, h_idx));
