@@ -6,8 +6,7 @@
 /// at finalization.
 
 module design_a::accumulator {
-    use iota::object::{Self};
-    use iota::hash;
+    use std::hash;
     use iota::bcs;
     use design_a::types::{
         Self, MedicalDevice, EvidenceSlot, EvidenceBatch,

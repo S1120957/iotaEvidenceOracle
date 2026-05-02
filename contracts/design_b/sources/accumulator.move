@@ -8,7 +8,7 @@
 ///   All consensus cost is concentrated here, once per window.
 
 module design_b::accumulator {
-    use iota::hash;
+    use std::hash;
     use iota::bcs;
     use iota::object::ID;
     use design_b::types::{
