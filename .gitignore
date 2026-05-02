@@ -1,0 +1,20 @@
+# Environment — contains private keys and package IDs, never commit
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Results — data files, not source
+harness/results/*.csv
+harness/results/*.json
+
+# IOTA build artefacts
+contracts/design_a/build/
+contracts/design_b/build/
+
+# macOS
+.DS_Store
