@@ -181,9 +181,11 @@ def run_design_b_window(n, wid, ws, we, devices):
         t_conf = time.time() * 1000
         slot_id = parse_object_id(stdout)
         digest  = parse_digest(stdout)
-        success = bool(slot_id)
+        success = bool(digest)
         if slot_id:
             slot_ids.append(slot_id)
+        elif digest:
+            slot_ids.append(digest)
         write_records.append({
             "sensor": i,
             "t_submit_ms": t_sub,

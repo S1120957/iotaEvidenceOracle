@@ -153,7 +153,7 @@ def run_fault_window(design, n, wid, ws, we, devices, fault):
         t_conf  = time.time() * 1000
         digest  = parse_digest(stdout)
         status  = parse_status(stdout)
-        success = status == "success" if design == "A" else bool(parse_object_id(stdout))
+        success = status == "success" if design == "A" else bool(parse_digest(stdout))
 
         write_records.append({
             "sensor": i, "success": success,
