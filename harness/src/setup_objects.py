@@ -9,9 +9,9 @@ PACKAGE_ID_B_DEFAULT = "0xcde5399d72f19436e5c9b8e6c60be94645ee2e5ec23daeae9bfcad
 WALLET_DEFAULT       = "0xd0e7976a242007d7ce49087578e46f93ae9b5bbfd8288240c39691905a5572b3"
 
 SENSOR_COUNTS      = [2, 4, 8, 16, 32]
-WINDOW_DURATION_MS = 5000
-GRACE_INTERVAL_MS  = 500
-MAX_SPREAD_MS      = 3000
+WINDOW_DURATION_MS = 3600000   # 1 hour — keeps batch open for full benchmark
+GRACE_INTERVAL_MS  = 60000     # 60 second grace
+MAX_SPREAD_MS      = 3600000   # spread = full window duration
 GAS_BUDGET         = 10000000
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
