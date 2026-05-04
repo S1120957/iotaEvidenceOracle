@@ -61,6 +61,16 @@ def parse_status(stdout):
         return ""
 
 
+def parse_abort_code(stdout, stderr):
+    combined = stdout + stderr
+    for code in ["abort code: 1", "abort code: 2", "abort code: 3",
+                 "abort code: 4", "abort code: 5", "abort code: 6",
+                 "abort code: 7", "abort code: 8"]:
+        if code in combined:
+            return int(code.split(": ")[1])
+    return None
+
+
 def make_vecs(device_addr, sensor_type, nonce, ts_ms):
     rh = list(hashlib.sha256(
         f"{device_addr}:{sensor_type}:{nonce}:{ts_ms}".encode()).digest())
@@ -84,15 +94,9 @@ def create_batch(wid, ws, we, n, window_dur):
 
 
 def run_fault_window(design, n, wid, ws, we, devices, fault):
-    """
-    Run one window with the given fault scenario applied to sensor 0.
-
-    F1 — Missing sensor:    sensor 0 is silenced (skipped entirely)
-    F2 — Late arrival:      sensor 0 submits with timestamp > we + grace
-    F3 — Conflicting read:  sensor 0 submits twice with same sensor_type
-    """
     window_dur = max(10000, n * 2000)
-    batch_id = None
+    batch_id   = None
+    slot_ids   = []
 
     if design == "A":
         batch_id = create_batch(wid, ws, we, n, window_dur)
@@ -111,20 +115,16 @@ def run_fault_window(design, n, wid, ws, we, devices, fault):
         nonce    = random.randint(10000, 99999)
         ts_ms    = int(time.time() * 1000)
 
-        # Apply fault to sensor 0 only
         if i == 0:
             if fault == "F1":
-                # Silent — skip this sensor entirely
                 write_records.append({
                     "sensor": i, "success": False,
                     "fault": "F1_silent", "latency_ms": 0,
                 })
                 continue
             elif fault == "F2":
-                # Late timestamp — beyond we + grace
                 ts_ms = we + GRACE_INTERVAL_MS + 500
             elif fault == "F3":
-                # Will submit twice below
                 pass
 
         rh_v, sh_v = make_vecs(dev_addr, i + 1, nonce, ts_ms)
@@ -141,6 +141,9 @@ def run_fault_window(design, n, wid, ws, we, devices, fault):
                 "@" + batch_id, "@" + dev_obj, "slot",
                 "--gas-budget", GAS, "--json",
             ])
+            t_conf  = time.time() * 1000
+            status  = parse_status(stdout)
+            success = status == "success"
         else:
             stdout, stderr = run_cli([
                 "client", "ptb",
@@ -149,11 +152,14 @@ def run_fault_window(design, n, wid, ws, we, devices, fault):
                 str(wid), sh_v,
                 "--gas-budget", GAS, "--json",
             ])
-
-        t_conf  = time.time() * 1000
-        digest  = parse_digest(stdout)
-        status  = parse_status(stdout)
-        success = status == "success" if design == "A" else bool(parse_digest(stdout))
+            t_conf  = time.time() * 1000
+            slot_id = parse_object_id(stdout)
+            digest  = parse_digest(stdout)
+            success = bool(digest)
+            if slot_id:
+                slot_ids.append(slot_id)
+            elif digest:
+                slot_ids.append(digest)
 
         write_records.append({
             "sensor": i, "success": success,
@@ -161,7 +167,6 @@ def run_fault_window(design, n, wid, ws, we, devices, fault):
             "latency_ms": t_conf - t_sub,
         })
 
-        # F3: submit duplicate for sensor 0 (same sensor_type = conflict)
         if i == 0 and fault == "F3":
             nonce2 = random.randint(10000, 99999)
             ts2    = int(time.time() * 1000)
@@ -178,36 +183,40 @@ def run_fault_window(design, n, wid, ws, we, devices, fault):
                     "--gas-budget", GAS, "--json",
                 ])
             else:
-                run_cli([
+                stdout2, _ = run_cli([
                     "client", "ptb",
                     "--move-call", PKG_B + "::accumulator::create_slot",
                     "@" + dev_addr, str(i + 1), rh2, str(ts2), str(nonce2),
                     str(wid), sh2,
                     "--gas-budget", GAS, "--json",
                 ])
+                slot_id2 = parse_object_id(stdout2)
+                digest2  = parse_digest(stdout2)
+                if slot_id2:
+                    slot_ids.append(slot_id2)
+                elif digest2:
+                    slot_ids.append(digest2)
 
-    # Finalize for Design A
-    batch_status = "slots_created"
-    fin_latency  = None
+    # ── Finalization ──────────────────────────────────────────────────────
+    batch_status  = "slots_created"
+    fin_latency   = None
+    success_count = sum(1 for w in write_records if w["success"])
 
     if design == "A" and batch_id:
         deadline = we + GRACE_INTERVAL_MS + 500
         wait_ms  = deadline - int(time.time() * 1000)
         if wait_ms > 0:
             time.sleep(wait_ms / 1000.0)
-
         current_time = int(time.time() * 1000)
         t_fin = time.time() * 1000
-        stdout, _ = run_cli([
+        stdout, stderr = run_cli([
             "client", "ptb",
             "--move-call", PKG_A + "::accumulator::finalize",
             "@" + batch_id, str(current_time),
             "--gas-budget", GAS, "--json",
         ])
-        fin_latency  = time.time() * 1000 - t_fin
-        fin_status   = parse_status(stdout)
-        success_count = sum(1 for w in write_records if w["success"])
-
+        fin_latency = time.time() * 1000 - t_fin
+        fin_status  = parse_status(stdout)
         if fin_status == "success":
             if success_count >= n:
                 batch_status = "finalized"
@@ -216,14 +225,54 @@ def run_fault_window(design, n, wid, ws, we, devices, fault):
         else:
             batch_status = "invalid"
 
+    elif design == "B":
+        deadline = we + GRACE_INTERVAL_MS + 500
+        wait_ms  = deadline - int(time.time() * 1000)
+        if wait_ms > 0:
+            time.sleep(wait_ms / 1000.0)
+
+        if not slot_ids:
+            batch_status = "expired"
+        else:
+            current_time = int(time.time() * 1000)
+            config_id    = devices["config_object_id_b"]
+            slot_vec     = "vector[" + ",".join("@" + s for s in slot_ids) + "]"
+
+            t_fin = time.time() * 1000
+            stdout, stderr = run_cli([
+                "client", "ptb",
+                "--move-call", PKG_B + "::accumulator::finalize_from_slots",
+                slot_vec,
+                "@" + config_id,
+                str(current_time),
+                "--gas-budget", GAS, "--json",
+            ])
+            fin_latency = time.time() * 1000 - t_fin
+            fin_status  = parse_status(stdout)
+            digest      = parse_digest(stdout)
+
+            if fin_status == "success" and digest:
+                batch_status = "finalized"
+            else:
+                abort_code = parse_abort_code(stdout, stderr)
+                # Abort codes from accumulator.move:
+                # 1=count, 2=window_id, 3=timestamp, 4=spread,
+                # 5=registered, 6=not_open, 7=nonce, 8=conflict
+                if abort_code in (1, 3, 4):
+                    batch_status = "expired"
+                elif abort_code in (7, 8):
+                    batch_status = "invalid"
+                else:
+                    batch_status = "expired"
+
     return {
-        "design": design,
-        "n": n,
-        "fault": fault,
-        "writes": write_records,
-        "batch_status": batch_status,
+        "design":                  design,
+        "n":                       n,
+        "fault":                   fault,
+        "writes":                  write_records,
+        "batch_status":            batch_status,
         "finalization_latency_ms": fin_latency,
-        "success_count": sum(1 for w in write_records if w["success"]),
+        "success_count":           success_count,
     }
 
 
@@ -248,43 +297,52 @@ def main():
         for design in ["A", "B"]:
             for n in SENSOR_COUNTS:
                 devices = obj["by_n"][str(n)]
-                print("Fault=" + fault + " Design=" + design + " N=" + str(n) + " ...")
+                print("Fault=" + fault + " Design=" + design +
+                      " N=" + str(n) + " ...")
 
                 for w_idx in range(WINDOWS_PER_RUN):
-                    wid      = random.randint(1000, 8999)
-                    now      = int(time.time() * 1000)
-                    dur      = max(10000, n * 2000)
-                    ws       = now + 2000
-                    we       = ws + dur
+                    wid = random.randint(1000, 8999)
+                    now = int(time.time() * 1000)
+                    dur = max(10000, n * 2000)
+                    ws  = now + 2000
+                    we  = ws + dur
 
-                    rec = run_fault_window(design, n, wid, ws, we, devices, fault)
+                    rec = run_fault_window(
+                        design, n, wid, ws, we, devices, fault)
                     if rec is None:
                         continue
 
-                    lats = [w["latency_ms"] for w in rec["writes"] if w["success"] and w["latency_ms"] > 0]
+                    lats   = [w["latency_ms"] for w in rec["writes"]
+                              if w["success"] and w["latency_ms"] > 0]
                     lats_s = sorted(lats)
-                    p50 = lats_s[len(lats_s)//2] if lats_s else None
+                    p50    = lats_s[len(lats_s) // 2] if lats_s else None
 
                     row = {
-                        "fault": fault,
-                        "design": design,
-                        "N": n,
-                        "window": w_idx,
-                        "success_count": rec["success_count"],
-                        "batch_status": rec["batch_status"],
-                        "write_p50_ms": round(p50, 1) if p50 else None,
-                        "finalization_latency_ms": round(rec["finalization_latency_ms"], 1) if rec["finalization_latency_ms"] else None,
+                        "fault":                   fault,
+                        "design":                  design,
+                        "N":                       n,
+                        "window":                  w_idx,
+                        "success_count":           rec["success_count"],
+                        "batch_status":            rec["batch_status"],
+                        "write_p50_ms":            round(p50, 1) if p50 else None,
+                        "finalization_latency_ms": round(
+                            rec["finalization_latency_ms"], 1)
+                            if rec["finalization_latency_ms"] else None,
                     }
                     all_rows.append(row)
                     time.sleep(0.5)
 
                     p50s = str(round(p50, 1)) if p50 else "N/A"
-                    print("  w" + str(w_idx) + ": ok=" + str(rec["success_count"]) + "/" + str(n) + "  status=" + rec["batch_status"] + "  p50=" + p50s + "ms")
+                    print("  w" + str(w_idx) + ": ok=" +
+                          str(rec["success_count"]) + "/" + str(n) +
+                          "  status=" + rec["batch_status"] +
+                          "  p50=" + p50s + "ms")
 
     raw_path = os.path.join(RESULTS_DIR, "raw_fault_testnet.csv")
     if all_rows:
         with open(raw_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(all_rows[0].keys()))
+            writer = csv.DictWriter(
+                f, fieldnames=list(all_rows[0].keys()))
             writer.writeheader()
             writer.writerows(all_rows)
         print()
@@ -299,34 +357,31 @@ def _write_table2(rows):
         key = (row["fault"], row["design"])
         if key not in summary:
             summary[key] = {
-                "total": 0, "finalized": 0, "expired": 0,
-                "invalid": 0, "complete": 0,
+                "total": 0, "finalized": 0,
+                "expired": 0, "invalid": 0,
             }
         summary[key]["total"] += 1
         s = row["batch_status"]
         if s in summary[key]:
             summary[key][s] += 1
-        n = row["N"]
-        if row["success_count"] >= n:
-            summary[key]["complete"] += 1
 
     path = os.path.join(RESULTS_DIR, "table2_testnet.csv")
     table_rows = []
     for (fault, design), v in sorted(summary.items()):
         t = v["total"]
         table_rows.append({
-            "fault":            fault,
-            "design":           design,
-            "validity_pct":     round(v["finalized"] / t * 100, 1),
-            "expired_pct":      round(v["expired"]   / t * 100, 1),
-            "invalid_pct":      round(v["invalid"]    / t * 100, 1),
-            "completeness_pct": round(v["complete"]   / t * 100, 1),
-            "n_windows":        t,
+            "fault":         fault,
+            "design":        design,
+            "finalized_pct": round(v["finalized"] / t * 100, 1),
+            "expired_pct":   round(v["expired"]   / t * 100, 1),
+            "invalid_pct":   round(v["invalid"]   / t * 100, 1),
+            "n_windows":     t,
         })
 
     if table_rows:
         with open(path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(table_rows[0].keys()))
+            writer = csv.DictWriter(
+                f, fieldnames=list(table_rows[0].keys()))
             writer.writeheader()
             writer.writerows(table_rows)
         print("Table 2    -> " + path)
