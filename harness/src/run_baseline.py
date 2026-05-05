@@ -238,7 +238,7 @@ def main():
     os.makedirs(RESULTS_DIR, exist_ok=True)
     all_rows = []
 
-    for design in ["A", "B"]:
+    for design in ["A"]:
         for n in SENSOR_COUNTS:
             devices = obj["by_n"][str(n)]
             print("Design " + design + " N=" + str(n) + " ...")

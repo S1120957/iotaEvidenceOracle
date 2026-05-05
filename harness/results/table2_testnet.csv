@@ -1,7 +1,7 @@
-fault,design,validity_pct,expired_pct,invalid_pct,completeness_pct,n_windows
-F1,A,0.0,90.2,9.8,0.0,41
-F1,B,0.0,0.0,0.0,0.0,50
-F2,A,0.0,50.0,50.0,0.0,30
-F2,B,0.0,0.0,0.0,14.0,50
-F3,A,0.0,35.3,64.7,5.9,17
-F3,B,0.0,0.0,0.0,0.0,50
+fault,design,finalized_pct,expired_pct,invalid_pct,n_windows
+F1,A,0.0,100.0,0.0,50
+F1,B,0.0,100.0,0.0,50
+F2,A,0.0,100.0,0.0,50
+F2,B,0.0,100.0,0.0,50
+F3,A,100.0,0.0,0.0,50
+F3,B,0.0,100.0,0.0,50
