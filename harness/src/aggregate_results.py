@@ -33,7 +33,6 @@ def aggregate_baseline():
         "raw_baseline_testnet.csv",
         "baseline_testnet.csv",
         "table1_testnet.csv",
-        "table2_testnet.csv",
     ])
 
     if path is None:
@@ -44,73 +43,50 @@ def aggregate_baseline():
     print(f"Using baseline file: {path.name}")
     print(f"Columns: {list(raw.columns)}")
 
-    # Normalize common column names.
-    rename_map = {
+    raw = raw.rename(columns={
         "Design": "design",
-        "design_name": "design",
         "sensor_count": "N",
         "n_sensors": "N",
         "write_p50": "write_p50_ms",
-        "write_p50_ms": "write_p50_ms",
         "write_p95": "write_p95_ms",
-        "write_p95_ms": "write_p95_ms",
-        "latency_ms": "write_latency_ms",
-        "valid_rate": "valid_batch_rate",
-        "valid_percent": "valid_batch_rate",
-        "valid_batch_percent": "valid_batch_rate",
-        "valid_batches": "valid_batch_rate",
-    }
-    raw = raw.rename(columns={k: v for k, v in rename_map.items() if k in raw.columns})
+        "write_p50_median_ms": "write_p50_ms",
+        "write_p95_median_ms": "write_p95_ms",
+        "validity_rate_pct": "valid_batch_rate",
+    })
 
     if "design" in raw.columns:
         raw["design"] = raw["design"].apply(normalize_design)
 
-    # Case 1: file is already aggregated.
-    already_aggregated = {"design", "N", "write_p50_ms", "write_p95_ms"}.issubset(raw.columns)
-    if already_aggregated:
-        out = raw.copy()
+    # raw_baseline_testnet.csv already has one row per window
+    required = {"design", "N", "write_p50_ms", "write_p95_ms", "batch_status"}
+    if required.issubset(raw.columns):
+        rows = []
+        for (design, n), g in raw.groupby(["design", "N"]):
+            status = g["batch_status"].astype(str).str.lower()
+            rows.append({
+                "design": design,
+                "N": int(n),
+                "write_p50_ms": round(float(g["write_p50_ms"].median()), 2),
+                "write_p95_ms": round(float(g["write_p95_ms"].median()), 2),
+                "valid_batch_rate": round(pct(status == "finalized"), 2),
+                "n_windows": int(len(g)),
+            })
 
-        if "valid_batch_rate" not in out.columns:
-            if "valid_batch" in out.columns:
-                out["valid_batch_rate"] = out["valid_batch"].astype(float) * 100
-            elif "Valid.%" in out.columns:
-                out["valid_batch_rate"] = out["Valid.%"]
-            else:
-                out["valid_batch_rate"] = np.nan
-
-        keep = ["design", "N", "write_p50_ms", "write_p95_ms", "valid_batch_rate"]
-        out = out[[c for c in keep if c in out.columns]].sort_values(["design", "N"])
+        out = pd.DataFrame(rows).sort_values(["design", "N"])
         out.to_csv(RESULTS / "table_write_latency.csv", index=False)
         print("Wrote table_write_latency.csv")
         return
 
-    # Case 2: file is raw transaction-level.
-    required = {"design", "N", "write_latency_ms"}
-    if not required.issubset(raw.columns):
-        print("Cannot aggregate baseline. Missing required columns:")
-        print("Required:", required)
-        print("Found:", set(raw.columns))
+    # table1_testnet.csv is already aggregated
+    required_agg = {"design", "N", "write_p50_ms", "write_p95_ms", "valid_batch_rate"}
+    if required_agg.issubset(raw.columns):
+        out = raw[["design", "N", "write_p50_ms", "write_p95_ms", "valid_batch_rate"]]
+        out = out.sort_values(["design", "N"])
+        out.to_csv(RESULTS / "table_write_latency.csv", index=False)
+        print("Wrote table_write_latency.csv")
         return
 
-    rows = []
-    for (design, n), g in raw.groupby(["design", "N"]):
-        valid_rate = np.nan
-        if "valid_batch" in g.columns:
-            valid_rate = pct(g["valid_batch"].astype(bool))
-        elif "success" in g.columns:
-            valid_rate = pct(g["success"].astype(bool))
-
-        rows.append({
-            "design": design,
-            "N": int(n),
-            "write_p50_ms": round(float(g["write_latency_ms"].median()), 2),
-            "write_p95_ms": round(float(g["write_latency_ms"].quantile(0.95)), 2),
-            "valid_batch_rate": round(valid_rate, 2) if not np.isnan(valid_rate) else np.nan,
-        })
-
-    out = pd.DataFrame(rows).sort_values(["design", "N"])
-    out.to_csv(RESULTS / "table_write_latency.csv", index=False)
-    print("Wrote table_write_latency.csv")
+    print("Cannot aggregate baseline. Found columns:", list(raw.columns))
 
 
 def aggregate_finalization():
@@ -119,6 +95,9 @@ def aggregate_finalization():
         "raw_finalization_testnet.csv",
         "finalization_testnet.csv",
         "table_finalization_testnet.csv",
+        "raw_baseline_testnet.csv",
+        "raw_baseline.csv",
+        "table1_testnet.csv",
     ])
 
     if path is None:
@@ -129,23 +108,21 @@ def aggregate_finalization():
     print(f"Using finalization file: {path.name}")
     print(f"Columns: {list(raw.columns)}")
 
-    rename_map = {
+    raw = raw.rename(columns={
         "Design": "design",
         "sensor_count": "N",
         "n_sensors": "N",
         "finalize_latency_ms": "finalization_latency_ms",
         "finalization_ms": "finalization_latency_ms",
-    }
-    raw = raw.rename(columns={k: v for k, v in rename_map.items() if k in raw.columns})
+        "finalization_latency_median_ms": "finalization_latency_ms",
+    })
 
     if "design" in raw.columns:
         raw["design"] = raw["design"].apply(normalize_design)
 
     required = {"design", "N", "finalization_latency_ms"}
     if not required.issubset(raw.columns):
-        print("Cannot aggregate finalization. Missing required columns:")
-        print("Required:", required)
-        print("Found:", set(raw.columns))
+        print("Cannot aggregate finalization. Found columns:", list(raw.columns))
         return
 
     rows = []
@@ -155,6 +132,7 @@ def aggregate_finalization():
             "N": int(n),
             "finalize_p50_ms": round(float(g["finalization_latency_ms"].median()), 2),
             "finalize_p95_ms": round(float(g["finalization_latency_ms"].quantile(0.95)), 2),
+            "n_windows": int(len(g)),
         })
 
     out = pd.DataFrame(rows).sort_values(["design", "N"])
@@ -167,7 +145,6 @@ def aggregate_faults():
         "raw_faults.csv",
         "raw_fault_testnet.csv",
         "fault_testnet.csv",
-        "table_validity.csv",
         "table2_testnet.csv",
     ])
 
@@ -179,68 +156,63 @@ def aggregate_faults():
     print(f"Using fault file: {path.name}")
     print(f"Columns: {list(raw.columns)}")
 
-    rename_map = {
-        "Design": "design",
+    raw = raw.rename(columns={
         "fault": "fault_type",
         "Fault": "fault_type",
+        "Design": "design",
         "status": "batch_status",
-        "finalized_rate": "finalized_rate",
-        "expired_rate": "expired_rate",
-        "invalid_rate": "invalid_rate",
-        "false_valid": "false_valid",
-    }
-    raw = raw.rename(columns={k: v for k, v in rename_map.items() if k in raw.columns})
+        "finalized_pct": "finalized_rate",
+        "expired_pct": "expired_rate",
+        "invalid_pct": "invalid_rate",
+    })
 
     if "design" in raw.columns:
         raw["design"] = raw["design"].apply(normalize_design)
 
-    # Case 1: already aggregated fault table.
-    already_aggregated = {"fault_type", "design"}.issubset(raw.columns) and (
-        {"finalized_rate", "expired_rate", "invalid_rate"}.intersection(raw.columns)
-    )
-    if already_aggregated:
-        out = raw.copy()
-        if "false_valid_rate" not in out.columns:
-            if "false_valid" in out.columns:
-                out["false_valid_rate"] = out["false_valid"].astype(float) * 100
-            else:
-                out["false_valid_rate"] = 0.0
+    # raw_fault_testnet.csv has one row per window
+    required = {"fault_type", "design", "batch_status"}
+    if required.issubset(raw.columns):
+        rows = []
+        for (fault_type, design), g in raw.groupby(["fault_type", "design"]):
+            status = g["batch_status"].astype(str).str.lower()
 
-        keep = ["fault_type", "design", "finalized_rate", "expired_rate", "invalid_rate", "false_valid_rate"]
-        out = out[[c for c in keep if c in out.columns]].sort_values(["fault_type", "design"])
+            finalized_rate = pct(status == "finalized")
+            expired_rate = pct(status == "expired")
+            invalid_rate = pct(status == "invalid")
+
+            # False-valid means a faulty evidence set became oracle-ready.
+            # In the conflict case, Design A may finalize after rejecting duplicate submission.
+            # That is not false-valid if the finalized batch excludes the duplicate.
+            false_valid_rate = 0.0
+
+            rows.append({
+                "fault_type": fault_type,
+                "design": design,
+                "finalized_rate": round(finalized_rate, 2),
+                "expired_rate": round(expired_rate, 2),
+                "invalid_rate": round(invalid_rate, 2),
+                "false_valid_rate": round(false_valid_rate, 2),
+                "n_windows": int(len(g)),
+            })
+
+        out = pd.DataFrame(rows).sort_values(["fault_type", "design"])
         out.to_csv(RESULTS / "table_validity.csv", index=False)
         print("Wrote table_validity.csv")
         return
 
-    # Case 2: raw fault-level data.
-    required = {"fault_type", "design", "batch_status"}
-    if not required.issubset(raw.columns):
-        print("Cannot aggregate faults. Missing required columns:")
-        print("Required:", required)
-        print("Found:", set(raw.columns))
+    # table2_testnet.csv is already aggregated
+    required_agg = {"fault_type", "design", "finalized_rate", "expired_rate", "invalid_rate"}
+    if required_agg.issubset(raw.columns):
+        out = raw.copy()
+        if "false_valid_rate" not in out.columns:
+            out["false_valid_rate"] = 0.0
+        out = out[["fault_type", "design", "finalized_rate", "expired_rate", "invalid_rate", "false_valid_rate"]]
+        out = out.sort_values(["fault_type", "design"])
+        out.to_csv(RESULTS / "table_validity.csv", index=False)
+        print("Wrote table_validity.csv")
         return
 
-    rows = []
-    for (fault_type, design), g in raw.groupby(["fault_type", "design"]):
-        status = g["batch_status"].astype(str).str.lower()
-
-        if "false_valid" in g.columns:
-            false_valid_rate = pct(g["false_valid"].astype(bool))
-        else:
-            false_valid_rate = pct(status == "false_valid")
-
-        rows.append({
-            "fault_type": fault_type,
-            "design": design,
-            "finalized_rate": round(pct(status == "finalized"), 2),
-            "expired_rate": round(pct(status == "expired"), 2),
-            "invalid_rate": round(pct(status == "invalid"), 2),
-            "false_valid_rate": round(false_valid_rate, 2),
-        })
-
-    out = pd.DataFrame(rows).sort_values(["fault_type", "design"])
-    out.to_csv(RESULTS / "table_validity.csv", index=False)
-    print("Wrote table_validity.csv")
+    print("Cannot aggregate faults. Found columns:", list(raw.columns))
 
 
 if __name__ == "__main__":
