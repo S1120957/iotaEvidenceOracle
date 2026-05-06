@@ -15,16 +15,18 @@ PKG_A  = ""
 PKG_B  = ""
 WALLET = ""
 
-GAS                 = "20000000"
-WINDOW_DURATION_MS  = 10000
-GRACE_INTERVAL_MS   = 2000
-MAX_SPREAD_MS       = 10000
+GAS                      = "20000000"
+WINDOW_DURATION_MS       = 10000
+GRACE_INTERVAL_MS        = 2000
+MAX_SPREAD_MS            = 10000
 DEFAULT_WINDOWS_PER_RUN  = 20
 DEFAULT_SENSOR_COUNTS    = [2, 4, 8, 16]   # N=2 ideal → N=16 stress
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "results"))
 
+
+# ── CLI helpers ───────────────────────────────────────────────────────────────
 
 def run_cli(args: List[str]) -> Tuple[str, str, int]:
     result = subprocess.run(
@@ -72,13 +74,12 @@ def parse_status(stdout: str) -> str:
 
 
 def build_debug(stderr: str, stdout: str) -> str:
-    parts = []
-    if stderr and stderr.strip():
-        clean = "\n".join(
-            l for l in stderr.strip().splitlines() if "mismatch" not in l)
-        if clean:
-            parts.append(clean)
-    return "\n".join(parts)
+    if not stderr:
+        return ""
+    clean = "\n".join(
+        l for l in stderr.strip().splitlines()
+        if "mismatch" not in l and l.strip())
+    return clean
 
 
 def make_vecs(device_addr: str, sensor_type: int,
@@ -90,6 +91,8 @@ def make_vecs(device_addr: str, sensor_type: int,
     sh_v = "vector[" + ",".join(str(b) for b in sh) + "]"
     return rh_v, sh_v
 
+
+# ── Stats helpers ─────────────────────────────────────────────────────────────
 
 def percentile(values: List[float], q: float) -> Optional[float]:
     if not values:
@@ -110,6 +113,20 @@ def safe_round(value: Optional[float], digits: int = 2) -> Optional[float]:
     if value is None:
         return None
     return round(float(value), digits)
+
+
+# ── Device ID lookup ──────────────────────────────────────────────────────────
+
+def get_device_ids_a(devices: Dict[str, Any], n: int) -> List[str]:
+    ids = (devices.get("device_object_ids_a")
+           or devices.get("device_object_ids", []))
+    return ids[:n]
+
+
+def get_device_ids_b(devices: Dict[str, Any], n: int) -> List[str]:
+    ids = (devices.get("device_object_ids_b")
+           or devices.get("device_object_ids", []))
+    return ids[:n]
 
 
 # ── Design A ──────────────────────────────────────────────────────────────────
@@ -140,7 +157,7 @@ def run_design_a_window(
     if not batch_id:
         return None
 
-    device_object_ids = devices.get("device_object_ids", [])[:n]
+    device_object_ids = get_device_ids_a(devices, n)
     device_addresses  = devices["device_addresses"][:n]
 
     wait_ms = ws - int(time.time() * 1000) + 50
@@ -165,15 +182,14 @@ def run_design_a_window(
             "@" + batch_id, "@" + dev_obj, "slot",
             "--gas-budget", GAS, "--json",
         ])
-        t_conf  = time.time() * 1000
-        status  = parse_status(stdout)
-        digest  = parse_digest(stdout)
+        t_conf = time.time() * 1000
         write_records.append({
             "sensor": i,
-            "t_submit_ms": t_sub, "t_confirmed_ms": t_conf,
+            "t_submit_ms": t_sub,
+            "t_confirmed_ms": t_conf,
             "latency_ms": t_conf - t_sub,
-            "success": status == "success",
-            "digest": digest,
+            "success": parse_status(stdout) == "success",
+            "digest": parse_digest(stdout),
         })
 
     deadline = we + GRACE_INTERVAL_MS + 500
@@ -182,7 +198,7 @@ def run_design_a_window(
         time.sleep(wait_ms / 1000.0)
 
     current_time = int(time.time() * 1000)
-    t_fin_start = time.time() * 1000
+    t_fin_start  = time.time() * 1000
     stdout, stderr, _ = run_cli([
         "client", "ptb",
         "--move-call", f"{PKG_A}::accumulator::finalize",
@@ -195,12 +211,15 @@ def run_design_a_window(
 
     return {
         "design": "A", "n": n, "window_id": wid,
-        "batch_id": batch_id, "writes": write_records,
+        "batch_id": batch_id,
+        "writes": write_records,
         "slot_ids": "",
         "finalization_latency_ms": t_fin_end - t_fin_start,
-        "fin_digest": fin_digest, "fin_status": fin_status,
+        "fin_digest": fin_digest,
+        "fin_status": fin_status,
         "batch_status": "finalized" if fin_status == "success" else "failed",
-        "window_end_ms": we, "t_finalized_ms": t_fin_end,
+        "window_end_ms": we,
+        "t_finalized_ms": t_fin_end,
         "finalization_stderr": build_debug(stderr, stdout)
             if fin_status != "success" else "",
     }
@@ -227,7 +246,8 @@ def create_config_b(wid: int, ws: int, we: int, n: int) -> str:
 
 
 def finalize_design_b_slots(
-        slot_ids: List[str], config_id: str,
+        slot_ids: List[str],
+        config_id: str,
         current_time_ms: int) -> Tuple[str, str, str]:
     slot_type = f"<{PKG_B}::types::EvidenceSlot>"
     slot_vec  = "[" + ",".join("@" + s for s in slot_ids) + "]"
@@ -279,23 +299,19 @@ def run_design_b_window(
         status  = parse_status(stdout)
         digest  = parse_digest(stdout)
         slot_id = parse_object_id(stdout)
-        # success if tx confirmed AND slot object was created
         success = (status == "success") and bool(slot_id)
-        if not success and bool(digest):
-            # tx succeeded but slot_id not in objectChanges — use digest
-            # as fallback identifier; try to recover slot_id from output
-            success = True
         if slot_id:
             slot_ids.append(slot_id)
         write_records.append({
             "sensor": i,
-            "t_submit_ms": t_sub, "t_confirmed_ms": t_conf,
+            "t_submit_ms": t_sub,
+            "t_confirmed_ms": t_conf,
             "latency_ms": t_conf - t_sub,
             "success": success,
-            "digest": digest, "slot_id": slot_id,
+            "digest": digest,
+            "slot_id": slot_id,
         })
 
-    # Wait for grace interval then finalize
     deadline = we + GRACE_INTERVAL_MS + 500
     wait_ms  = deadline - int(time.time() * 1000)
     if wait_ms > 0:
@@ -316,34 +332,41 @@ def run_design_b_window(
 
     return {
         "design": "B", "n": n, "window_id": wid,
-        "config_id": config_id, "writes": write_records,
+        "config_id": config_id,
+        "writes": write_records,
         "slot_ids": ";".join(slot_ids),
         "finalization_latency_ms": t_fin_end - t_fin_start,
-        "fin_digest": fin_digest, "fin_status": fin_status,
+        "fin_digest": fin_digest,
+        "fin_status": fin_status,
         "batch_status": "finalized" if fin_status == "success" else "failed",
-        "window_end_ms": we, "t_finalized_ms": t_fin_end,
+        "window_end_ms": we,
+        "t_finalized_ms": t_fin_end,
         "finalization_stderr": fin_stderr,
     }
 
 
-# ── Metrics and output ────────────────────────────────────────────────────────
+# ── Metrics ───────────────────────────────────────────────────────────────────
 
 def compute_metrics(record: Dict[str, Any]) -> Dict[str, Any]:
     lats = [w["latency_ms"] for w in record["writes"] if w["success"]]
     return {
-        "write_p50_ms":   median(lats),
-        "write_p95_ms":   percentile(lats, 0.95),
-        "success_count":  sum(1 for w in record["writes"] if w["success"]),
+        "write_p50_ms":  median(lats),
+        "write_p95_ms":  percentile(lats, 0.95),
+        "success_count": sum(1 for w in record["writes"] if w["success"]),
     }
 
+
+# ── Output ────────────────────────────────────────────────────────────────────
 
 def write_raw(rows: List[Dict[str, Any]], path: str) -> None:
     if not rows:
         return
     fields = [
-        "design", "N", "window", "write_p50_ms", "write_p95_ms",
-        "finalization_latency_ms", "batch_status", "success_count",
-        "slot_ids", "fin_digest", "finalization_stderr",
+        "design", "N", "window",
+        "write_p50_ms", "write_p95_ms",
+        "finalization_latency_ms", "batch_status",
+        "success_count", "slot_ids", "fin_digest",
+        "finalization_stderr",
     ]
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
@@ -374,17 +397,19 @@ def write_table1(rows: List[Dict[str, Any]], path: str) -> None:
         finalized = sum(1 for s in v["statuses"] if s == "finalized")
         complete  = sum(1 for c in v["success_counts"] if int(c) == int(n))
         table_rows.append({
-            "design": design, "N": n,
-            "write_p50_median_ms":          safe_round(median(v["p50s"])),
-            "write_p95_median_ms":          safe_round(median(v["p95s"])),
-            "finalization_latency_median_ms":safe_round(median(v["fin_lats"])),
-            "finalization_latency_p95_ms":  safe_round(
+            "design":                        design,
+            "N":                             n,
+            "write_p50_median_ms":           safe_round(median(v["p50s"])),
+            "write_p95_median_ms":           safe_round(median(v["p95s"])),
+            "finalization_latency_median_ms":safe_round(
+                median(v["fin_lats"])),
+            "finalization_latency_p95_ms":   safe_round(
                 percentile(v["fin_lats"], 0.95)),
-            "write_success_rate_pct":       round(
+            "write_success_rate_pct":        round(
                 complete / len(v["statuses"]) * 100.0, 1),
-            "validity_rate_pct":            round(
+            "validity_rate_pct":             round(
                 finalized / len(v["statuses"]) * 100.0, 1),
-            "n_windows": len(v["statuses"]),
+            "n_windows":                     len(v["statuses"]),
         })
 
     if table_rows:
@@ -395,13 +420,14 @@ def write_table1(rows: List[Dict[str, Any]], path: str) -> None:
             writer.writerows(table_rows)
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--designs", nargs="+", default=["A", "B"],
-                        choices=["A", "B"])
-    parser.add_argument("--windows",  type=int,
+    parser = argparse.ArgumentParser(
+        description="IOTA testnet baseline benchmark — Design A and B")
+    parser.add_argument("--designs", nargs="+",
+                        default=["A", "B"], choices=["A", "B"])
+    parser.add_argument("--windows", type=int,
                         default=DEFAULT_WINDOWS_PER_RUN)
     parser.add_argument("--sensor-counts", nargs="+", type=int,
                         default=DEFAULT_SENSOR_COUNTS)
@@ -429,9 +455,9 @@ def load_object_ids() -> Dict[str, Any]:
     if not PKG_A or not PKG_B or not WALLET:
         print("ERROR: package_a, package_b, or wallet missing.")
         sys.exit(1)
-    print("Package A:", PKG_A)
-    print("Package B:", PKG_B)
-    print("Wallet   :", WALLET)
+    print("Package A :", PKG_A)
+    print("Package B :", PKG_B)
+    print("Wallet    :", WALLET)
     print()
     return obj
 
@@ -442,8 +468,8 @@ def main() -> None:
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
     print("Baseline sweep — IOTA testnet")
-    print("Designs      :", ", ".join(args.designs))
-    print("Sensor counts:", args.sensor_counts,
+    print("Designs       :", ", ".join(args.designs))
+    print("Sensor counts :", args.sensor_counts,
           "  (N=2 ideal → N=16 stress)")
     print("Windows/config:", args.windows)
     print()
@@ -487,17 +513,16 @@ def main() -> None:
                         "finalization_stderr", ""),
                 }
 
-                p50s = "N/A" if row["write_p50_ms"] is None \
-                    else f"{row['write_p50_ms']:.1f}"
-                fins = "N/A" if row["finalization_latency_ms"] is None \
-                    else f"{row['finalization_latency_ms']:.1f}"
-                print(f"  w{w_idx}: p50={p50s}ms  "
-                      f"fin={fins}ms  "
+                p50s = ("N/A" if row["write_p50_ms"] is None
+                        else f"{row['write_p50_ms']:.1f}")
+                fins = ("N/A" if row["finalization_latency_ms"] is None
+                        else f"{row['finalization_latency_ms']:.1f}")
+                print(f"  w{w_idx}: p50={p50s}ms  fin={fins}ms  "
                       f"status={row['batch_status']}  "
                       f"ok={row['success_count']}/{n}")
 
-                if row["finalization_stderr"] \
-                        and row["batch_status"] != "finalized":
+                if (row["finalization_stderr"]
+                        and row["batch_status"] != "finalized"):
                     print("    stderr:",
                           row["finalization_stderr"][:600])
 
