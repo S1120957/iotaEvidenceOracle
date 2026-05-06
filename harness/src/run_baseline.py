@@ -249,19 +249,44 @@ def finalize_design_b_slots(
         slot_ids: List[str],
         config_id: str,
         current_time_ms: int) -> Tuple[str, str, str]:
-    slot_type = f"<{PKG_B}::types::EvidenceSlot>"
+    # Build individual --assign + --move-call chain to collect slots,
+    # then pass them as a vector using --make-move-vec with correct syntax.
+    # PTB syntax: assign each slot object, then make-move-vec, then call.
+    slot_type = f"{PKG_B}::types::EvidenceSlot"
     slot_vec  = "[" + ",".join("@" + s for s in slot_ids) + "]"
+
     stdout, stderr, _ = run_cli([
         "client", "ptb",
-        "--make-move-vec", slot_type, slot_vec,
+        "--make-move-vec", f"<{slot_type}>", slot_vec,
         "--assign", "slots",
-        "--move-call", f"{PKG_B}::accumulator::finalize_from_slots",
-        "slots", "@" + config_id, str(current_time_ms),
-        "--gas-budget", GAS, "--json",
+        "--move-call", f"{PKG_B}::accumulator::finalize",
+        "slots",
+        "@" + config_id,
+        str(current_time_ms),
+        "--gas-budget", GAS,
+        "--json",
     ])
     status = parse_status(stdout)
     digest = parse_digest(stdout)
     err    = build_debug(stderr, stdout)
+
+    # If still failing, try alternative: pass vector inline without make-move-vec
+    if status != "success" and not digest:
+        inline_vec = "vector[" + ",".join("@" + s for s in slot_ids) + "]"
+        stdout2, stderr2, _ = run_cli([
+            "client", "ptb",
+            "--move-call", f"{PKG_B}::accumulator::finalize_from_slots",
+            inline_vec,
+            "@" + config_id,
+            str(current_time_ms),
+            "--gas-budget", GAS,
+            "--json",
+        ])
+        status2 = parse_status(stdout2)
+        digest2 = parse_digest(stdout2)
+        if status2 == "success" or digest2:
+            return status2, digest2, build_debug(stderr2, stdout2)
+
     return status, digest, err
 
 
