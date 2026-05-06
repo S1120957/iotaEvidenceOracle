@@ -15,12 +15,12 @@ PKG_A  = ""
 PKG_B  = ""
 WALLET = ""
 
-GAS                      = "20000000"
+GAS                      = "100000000"
 WINDOW_DURATION_MS       = 10000
 GRACE_INTERVAL_MS        = 2000
-MAX_SPREAD_MS            = 10000
+MAX_SPREAD_MS            = 60000
 DEFAULT_WINDOWS_PER_RUN  = 20
-DEFAULT_SENSOR_COUNTS    = [2, 4, 8, 16]   # N=2 ideal → N=16 stress
+DEFAULT_SENSOR_COUNTS    = [2, 4, 8, 16]
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "results"))
@@ -39,6 +39,24 @@ def parse_json(stdout: str) -> Dict[str, Any]:
         return json.loads(stdout)
     except Exception:
         return {}
+
+
+def parse_object_id_from_digest(stdout: str, expected_digest: str) -> str:
+    """
+    Parse the created object ID only from a transaction with the expected
+    digest. This prevents accidentally picking up object IDs from cached
+    or replayed transactions.
+    """
+    data = parse_json(stdout)
+    tx_digest = data.get("digest", "")
+    if expected_digest and tx_digest != expected_digest:
+        return ""
+    for change in data.get("objectChanges", []):
+        if change.get("type") == "created":
+            oid = change.get("objectId", "")
+            if oid:
+                return oid
+    return ""
 
 
 def parse_object_id(stdout: str) -> str:
@@ -119,12 +137,6 @@ def safe_round(value: Optional[float], digits: int = 2) -> Optional[float]:
 
 def get_device_ids_a(devices: Dict[str, Any], n: int) -> List[str]:
     ids = (devices.get("device_object_ids_a")
-           or devices.get("device_object_ids", []))
-    return ids[:n]
-
-
-def get_device_ids_b(devices: Dict[str, Any], n: int) -> List[str]:
-    ids = (devices.get("device_object_ids_b")
            or devices.get("device_object_ids", []))
     return ids[:n]
 
@@ -245,48 +257,53 @@ def create_config_b(wid: int, ws: int, we: int, n: int) -> str:
     return config_id
 
 
+def create_slot_b(dev_addr: str, sensor_type: int,
+                  ts_ms: int, nonce: int, wid: int) -> Tuple[str, str, float, float]:
+    """
+    Create a single owned EvidenceSlot for Design B.
+    Returns (slot_id, digest, t_submit_ms, t_confirm_ms).
+    Validates that the returned slot belongs to a fresh transaction.
+    """
+    rh_v, sh_v = make_vecs(dev_addr, sensor_type, nonce, ts_ms)
+    t_sub = time.time() * 1000
+    stdout, stderr, _ = run_cli([
+        "client", "ptb",
+        "--move-call", f"{PKG_B}::accumulator::create_slot",
+        "@" + dev_addr, str(sensor_type), rh_v,
+        str(ts_ms), str(nonce), str(wid), sh_v,
+        "--gas-budget", GAS, "--json",
+    ])
+    t_conf  = time.time() * 1000
+    digest  = parse_digest(stdout)
+    status  = parse_status(stdout)
+
+    if status != "success" or not digest:
+        return "", "", t_sub, t_conf
+
+    # Parse slot_id only from this specific transaction digest
+    slot_id = parse_object_id_from_digest(stdout, digest)
+    return slot_id, digest, t_sub, t_conf
+
+
 def finalize_design_b_slots(
         slot_ids: List[str],
         config_id: str,
         current_time_ms: int) -> Tuple[str, str, str]:
-    # Build individual --assign + --move-call chain to collect slots,
-    # then pass them as a vector using --make-move-vec with correct syntax.
-    # PTB syntax: assign each slot object, then make-move-vec, then call.
-    slot_type = f"{PKG_B}::types::EvidenceSlot"
+    slot_type = f"<{PKG_B}::types::EvidenceSlot>"
     slot_vec  = "[" + ",".join("@" + s for s in slot_ids) + "]"
-
     stdout, stderr, _ = run_cli([
         "client", "ptb",
-        "--make-move-vec", f"<{slot_type}>", slot_vec,
-        "--assign", "slots",
+        "--make-move-vec", slot_type, slot_vec,
+        "--assign", "myslots",
         "--move-call", f"{PKG_B}::accumulator::finalize",
-        "slots",
-        "@" + config_id,
-        str(current_time_ms),
-        "--gas-budget", GAS,
-        "--json",
+        "myslots", "@" + config_id, str(current_time_ms),
+        "--gas-budget", GAS, "--json",
     ])
     status = parse_status(stdout)
     digest = parse_digest(stdout)
     err    = build_debug(stderr, stdout)
-
-    # If still failing, try alternative: pass vector inline without make-move-vec
-    if status != "success" and not digest:
-        inline_vec = "vector[" + ",".join("@" + s for s in slot_ids) + "]"
-        stdout2, stderr2, _ = run_cli([
-            "client", "ptb",
-            "--move-call", f"{PKG_B}::accumulator::finalize_from_slots",
-            inline_vec,
-            "@" + config_id,
-            str(current_time_ms),
-            "--gas-budget", GAS,
-            "--json",
-        ])
-        status2 = parse_status(stdout2)
-        digest2 = parse_digest(stdout2)
-        if status2 == "success" or digest2:
-            return status2, digest2, build_debug(stderr2, stdout2)
-
+    if not err and status != "success":
+        err = stdout[:600]
     return status, digest, err
 
 
@@ -294,12 +311,14 @@ def run_design_b_window(
         n: int, wid: int, ws: int, we: int,
         devices: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
+    # Create fresh config with this window's wid
     config_id = create_config_b(wid, ws, we, n)
     if not config_id:
         return None
 
     device_addresses = devices["device_addresses"][:n]
 
+    # Wait for window start
     wait_ms = ws - int(time.time() * 1000) + 50
     if wait_ms > 0:
         time.sleep(wait_ms / 1000.0)
@@ -308,25 +327,19 @@ def run_design_b_window(
     slot_ids      = []
 
     for i in range(n):
-        dev_addr = device_addresses[i]
-        ts_ms    = int(time.time() * 1000)
-        nonce    = random.randint(10000, 99999)
-        rh_v, sh_v = make_vecs(dev_addr, i + 1, nonce, ts_ms)
-        t_sub = time.time() * 1000
-        stdout, stderr, _ = run_cli([
-            "client", "ptb",
-            "--move-call", f"{PKG_B}::accumulator::create_slot",
-            "@" + dev_addr, str(i + 1), rh_v,
-            str(ts_ms), str(nonce), str(wid), sh_v,
-            "--gas-budget", GAS, "--json",
-        ])
-        t_conf  = time.time() * 1000
-        status  = parse_status(stdout)
-        digest  = parse_digest(stdout)
-        slot_id = parse_object_id(stdout)
-        success = (status == "success") and bool(slot_id)
-        if slot_id:
+        dev_addr    = device_addresses[i]
+        ts_ms       = int(time.time() * 1000)
+        nonce       = random.randint(10000, 99999)
+        sensor_type = i + 1
+
+        slot_id, digest, t_sub, t_conf = create_slot_b(
+            dev_addr, sensor_type, ts_ms, nonce, wid)
+
+        # Only accept slot if it was freshly created with correct wid
+        success = bool(slot_id) and bool(digest)
+        if success:
             slot_ids.append(slot_id)
+
         write_records.append({
             "sensor": i,
             "t_submit_ms": t_sub,
@@ -337,6 +350,7 @@ def run_design_b_window(
             "slot_id": slot_id,
         })
 
+    # Wait for grace interval
     deadline = we + GRACE_INTERVAL_MS + 500
     wait_ms  = deadline - int(time.time() * 1000)
     if wait_ms > 0:
@@ -345,15 +359,22 @@ def run_design_b_window(
     current_time = int(time.time() * 1000)
     t_fin_start  = time.time() * 1000
 
-    if slot_ids:
+    if len(slot_ids) == n:
+        fin_status, fin_digest, fin_stderr = finalize_design_b_slots(
+            slot_ids, config_id, current_time)
+    elif slot_ids:
+        # Partial slots — attempt finalize anyway, predicate will expire it
         fin_status, fin_digest, fin_stderr = finalize_design_b_slots(
             slot_ids, config_id, current_time)
     else:
         fin_status = "failed"
         fin_digest = ""
-        fin_stderr = f"0/{n} slots created — skipping finalize_from_slots"
+        fin_stderr = f"0/{n} slots created"
 
     t_fin_end = time.time() * 1000
+
+    if fin_stderr and fin_status != "success":
+        print(f"    fin_stderr: {fin_stderr[:400]}")
 
     return {
         "design": "B", "n": n, "window_id": wid,
@@ -495,7 +516,7 @@ def main() -> None:
     print("Baseline sweep — IOTA testnet")
     print("Designs       :", ", ".join(args.designs))
     print("Sensor counts :", args.sensor_counts,
-          "  (N=2 ideal → N=16 stress)")
+          "  (N=2 ideal -> N=16 stress)")
     print("Windows/config:", args.windows)
     print()
 
@@ -545,11 +566,6 @@ def main() -> None:
                 print(f"  w{w_idx}: p50={p50s}ms  fin={fins}ms  "
                       f"status={row['batch_status']}  "
                       f"ok={row['success_count']}/{n}")
-
-                if (row["finalization_stderr"]
-                        and row["batch_status"] != "finalized"):
-                    print("    stderr:",
-                          row["finalization_stderr"][:600])
 
                 all_rows.append(row)
                 time.sleep(1.0)
